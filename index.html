@@ -210,7 +210,7 @@
   <div class="breath-label" id="breathLabel"></div>
   <div class="affirm" id="affirm"></div>
 
-  <div class="dock chrome"><div class="hintbar" id="hintbar">키캡을 톡톡 · 우측 상단 <b>Design</b>으로 꾸미기</div></div>
+  <div class="dock chrome"><div class="hintbar" id="hintbar">키캡 톡톡 · 휠/핀치로 줌 · 두 손가락(또는 휠클릭)으로 회전 · <b>Design</b>으로 꾸미기</div></div>
 
   <div id="intro">
     <div class="inner">
@@ -238,6 +238,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 /* ════════════════════════════════════════════════════════════
    킵탭 · Keep Tap — 투명 스위치 + RGB 키캡 토이
@@ -297,7 +298,17 @@ const Audio = (() => {
     const g=ctx.createGain(); g.gain.value=0.55+vel*0.55; s.connect(g); g.connect(dry); s.start(ctx.currentTime+0.001); }
   const resume=()=>{ if(ctx&&ctx.state==='suspended') ctx.resume(); };
   const suspend=()=>{ if(ctx&&ctx.state==='running') ctx.suspend(); };
-  const start=()=>{ init(); resume(); started=true; };
+  // 무음 스위치 우회 — 유튜브처럼 무음 모드에서도 재생
+  let silentEl=null;
+  function makeSilentWavUrl(){ const sr=8000,n=(sr*0.4)|0,ab=new ArrayBuffer(44+n*2),dv=new DataView(ab),w=(o,s)=>{for(let i=0;i<s.length;i++)dv.setUint8(o+i,s.charCodeAt(i));};
+    w(0,'RIFF');dv.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,1,true);dv.setUint32(24,sr,true);dv.setUint32(28,sr*2,true);dv.setUint16(32,2,true);dv.setUint16(34,16,true);w(36,'data');dv.setUint32(40,n*2,true);
+    return URL.createObjectURL(new Blob([ab],{type:'audio/wav'})); }
+  function iosUnlock(){
+    try{ if('audioSession' in navigator) navigator.audioSession.type='playback'; }catch(e){}   // iOS 16.4+ : 미디어처럼 무음모드 무시
+    try{ if(!silentEl){ silentEl=document.createElement('audio'); silentEl.loop=true; silentEl.setAttribute('playsinline',''); silentEl.preload='auto'; silentEl.src=makeSilentWavUrl(); }
+      const p=silentEl.play(); p&&p.catch&&p.catch(()=>{}); }catch(e){}                          // 구형 iOS 폴백: 무음 미디어 재생으로 세션을 playback으로 전환
+  }
+  const start=()=>{ init(); resume(); iosUnlock(); started=true; };
   const setVolume=v=>{ volume=v; if(master) master.gain.setTargetAtTime(soundOn?v:0,ctx.currentTime,0.02); };
   const setSound=o=>{ soundOn=o; if(master) master.gain.setTargetAtTime(o?volume:0,ctx.currentTime,0.02); };
   const filt=(t,f,q,dest)=>{const x=ctx.createBiquadFilter();x.type=t;x.frequency.value=f;if(q)x.Q.value=q;x.connect(dest);return x;};
@@ -346,8 +357,10 @@ const Shake = { trauma:0, intensity:1.0, base:0.28,
 
 /* ── 4) Three.js 씬 ────────────────────────────────────── */
 const canvas=document.getElementById('scene');
-let renderer, scene, camera, stage, envMap, hemi;
+let renderer, scene, camera, stage, envMap, hemi, controls;
 const camBase=new THREE.Vector3(0,1.6,7), camTarget=new THREE.Vector3(0,0.85,0);
+const shakePrev=new THREE.Vector3();
+let lastN=0;
 const UNIT_SPACING=1.78;
 
 function initThree(){
@@ -359,6 +372,13 @@ function initThree(){
   renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=0.92;
   scene=new THREE.Scene();
   camera=new THREE.PerspectiveCamera(34,innerWidth/innerHeight,0.1,100); camera.position.copy(camBase); camera.lookAt(camTarget);
+  // 카메라 컨트롤: 휠/핀치=줌, 가운데버튼·두손가락=회전 (좌클릭/한손가락은 탭에 양보)
+  controls=new OrbitControls(camera, renderer.domElement);
+  controls.enablePan=false; controls.enableDamping=true; controls.dampingFactor=0.09;
+  controls.minDistance=3; controls.maxDistance=20; controls.minPolarAngle=0.22; controls.maxPolarAngle=1.46;
+  controls.rotateSpeed=0.8; controls.zoomSpeed=0.9; controls.target.copy(camTarget);
+  controls.mouseButtons={ LEFT:null, MIDDLE:THREE.MOUSE.ROTATE, RIGHT:null };
+  controls.touches={ ONE:null, TWO:THREE.TOUCH.DOLLY_ROTATE };
   const pmrem=new THREE.PMREMGenerator(renderer); envMap=pmrem.fromScene(new RoomEnvironment(),0.04).texture; scene.environment=envMap; pmrem.dispose();
   hemi=new THREE.HemisphereLight(0xffffff,0xc8ccd6,0.52); scene.add(hemi);
   const key=new THREE.DirectionalLight(0xffffff,1.12); key.position.set(-3,6,5); key.castShadow=true;
@@ -374,7 +394,7 @@ function initThree(){
   return true;
 }
 function onResize(){ if(!renderer)return; camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(devicePixelRatio||1,2)); frameCamera(); }
+  renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(Math.min(devicePixelRatio||1,2)); }
 
 function makeRadial(color){ const s=128,c=document.createElement('canvas');c.width=c.height=s;const g=c.getContext('2d');
   const gr=g.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2); gr.addColorStop(0,color);gr.addColorStop(0.25,color);gr.addColorStop(1,'rgba(255,255,255,0)');
@@ -487,7 +507,7 @@ function rebuildStage(){
   if(active.length===0){ slots[0].on=true; active.push({s:slots[0],i:0}); }
   const n=active.length;
   active.forEach((o,k)=>{ const u=makeUnit(o.s); u.slotIndex=o.i; u.group.position.x=(k-(n-1)/2)*UNIT_SPACING; stage.add(u.group); units.push(u); });
-  frameCamera();
+  if(units.length!==lastN){ lastN=units.length; frameCamera(); }   // 슬롯 수가 바뀔 때만 시점 리셋(사용자 줌/회전 보존)
 }
 function rebuildSlot(slotIndex){ // 한 슬롯만 다시 (구성 변화 없을 때는 머티리얼/각인/파츠만 갱신이 이상적이나, 단순화 위해 전체 재빌드)
   rebuildStage();
@@ -500,8 +520,8 @@ function frameCamera(){
   const targetW=totalW+1.9, targetH=3.4;
   const dH=targetH/(2*Math.tan(vFov/2)), dW=targetW/(2*Math.tan(vFov/2)*Math.max(1e-4,camera.aspect));
   const dist=Math.max(dH,dW); camTarget.set(0,0.7,0);
-  const el=0.44; camBase.set(0, camTarget.y+dist*Math.sin(el), dist*Math.cos(el));
-  camera.position.copy(camBase); camera.lookAt(camTarget);
+  const el=0.44; camera.position.set(0, camTarget.y+dist*Math.sin(el), dist*Math.cos(el));
+  if(controls){ controls.target.copy(camTarget); shakePrev.set(0,0,0); controls.update(); } else camera.lookAt(camTarget);
 }
 
 /* 파티클 */
@@ -558,7 +578,9 @@ function doTap(clientX,clientY){
   if(total===1){ whisperEl.style.opacity='0'; }
 }
 
-function onPointerDown(e){ if(!started) return; if(e.pointerType==='touch'&&e.isPrimary===false) return;
+function onPointerDown(e){ if(!started) return;
+  if(e.pointerType==='mouse' && e.button!==0) return;              // 가운데/우클릭은 카메라 회전용 → 탭 안 함
+  if(e.pointerType==='touch'&&e.isPrimary===false) return;         // 두 번째 손가락(줌/회전)은 탭 안 함
   if(e.target.closest('.dock,.tools,.panel,.design')) return; if(designOpen && e.clientX>innerWidth-340) return;
   doTap(e.clientX,e.clientY); }
 function onPointerUp(){ if(!started||!tapping)return; tapping=false; Audio.playRelease(0.7); }
@@ -592,10 +614,11 @@ function tick(t){
     // 살짝 떠다님
     if(!reduced) u.group.position.y=Math.sin(time*0.7+u.slotIndex)*0.012;
   }
-  // 카메라
-  if(!reduced){ parallax.x+=(parallax.tx-parallax.x)*Math.min(1,dt*4); parallax.y+=(parallax.ty-parallax.y)*Math.min(1,dt*4); }
-  const sh=reduced?{x:0,y:0}:Shake.sample(dt);
-  camera.position.set(camBase.x+parallax.x*0.7+sh.x, camBase.y-parallax.y*0.5+sh.y, camBase.z); camera.lookAt(camTarget);
+  // 카메라 (OrbitControls + 셰이크 오프셋, 피드백 방지 위해 이전 셰이크 제거 후 업데이트)
+  camera.position.sub(shakePrev);
+  if(controls) controls.update();
+  const sh=reduced?{x:0,y:0}:Shake.sample(dt); shakePrev.set(sh.x,sh.y,0);
+  camera.position.add(shakePrev);
   // 호흡 가이드
   if(breathing){ const cyc=time%10; let b,inhale; if(cyc<4){b=cyc/4;inhale=true;}else{b=1-(cyc-4)/6;inhale=false;} const e=0.5-0.5*Math.cos(b*Math.PI); hemi.intensity=0.7+e*0.12; breathLabel.textContent=inhale?'들이쉬고':'내쉬고'; breathLabel.style.opacity=0.6; }
   else { hemi.intensity=0.75; breathLabel.style.opacity=0; }
